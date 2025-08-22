@@ -160,11 +160,20 @@ class RARtoZIPConverter:
                 self.update_status(f"Convirtiendo: {name}")
 
             try:
+                self.update_status("Intentando conversión con rarfile...")
                 convert_rar_to_zip_file(rar_path, zip_path, progress_cb)
-            except rarfile.BadRarFile:
+                self.update_status("Conversión con rarfile completada")
+            except Exception as rar_error:
+                self.update_status(f"rarfile falló: {str(rar_error)}")
                 # Fallback: usar 7zip si está disponible
-                self.update_status("Usando método alternativo...")
-                self.convert_with_7zip(rar_path, zip_path)
+                try:
+                    self.update_status("Intentando método alternativo con 7zip...")
+                    self.convert_with_7zip(rar_path, zip_path)
+                except Exception as zip_error:
+                    self.update_status(f"7zip falló: {str(zip_error)}")
+                    # Último recurso: intentar con unar
+                    self.update_status("Intentando con unar como último recurso...")
+                    self.convert_with_unar(rar_path, zip_path)
 
             self.progress_var.set(100)
             self.update_status("Conversión completada exitosamente!")
@@ -182,41 +191,153 @@ class RARtoZIPConverter:
         """Método alternativo usando 7zip si está disponible"""
         try:
             import subprocess
-            # Intentar usar 7zip
-            result = subprocess.run([
-                '7z', 'x', rar_path, '-o/tmp/rar_extract', '-y'
-            ], capture_output=True, text=True)
+            import tempfile
             
-            if result.returncode == 0:
+            self.update_status("Intentando conversión directa RAR a ZIP con 7zip...")
+            
+            # Método 1: Intentar conversión directa usando 7zip
+            try:
+                result = subprocess.run([
+                    '7z', 'a', zip_path, rar_path, '-tzip'
+                ], capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    self.update_status("Conversión directa exitosa con 7zip")
+                    return
+                else:
+                    self.update_status(f"Conversión directa falló: {result.stderr}")
+            except Exception as direct_error:
+                self.update_status(f"Conversión directa no disponible: {str(direct_error)}")
+            
+            # Método 2: Extraer y reempaquetar (fallback)
+            self.update_status("Usando método de extracción y reempaquetado...")
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                self.update_status(f"Extrayendo a directorio temporal: {temp_dir}")
+                
+                # Intentar usar 7zip para extraer con formato específico
+                result = subprocess.run([
+                    '7z', 'x', rar_path, f'-o{temp_dir}', '-y', '-r'
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    # Si falla, intentar con diferentes opciones
+                    self.update_status("Primer intento falló, probando método alternativo...")
+                    result = subprocess.run([
+                        '7z', 'e', rar_path, f'-o{temp_dir}', '-y', '-r'
+                    ], capture_output=True, text=True)
+                    
+                    if result.returncode != 0:
+                        error_msg = f"7zip falló con código {result.returncode}: {result.stderr}"
+                        self.update_status(error_msg)
+                        raise Exception(error_msg)
+                
+                self.update_status("Creando archivo ZIP...")
+                
                 # Crear ZIP desde archivos extraídos
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    extract_dir = '/tmp/rar_extract'
-                    for root, dirs, files in os.walk(extract_dir):
+                    for root, dirs, files in os.walk(temp_dir):
                         for file in files:
                             file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, extract_dir)
+                            arcname = os.path.relpath(file_path, temp_dir)
                             zip_file.write(file_path, arcname)
+                            self.update_status(f"Agregando: {arcname}")
                 
-                # Limpiar archivos temporales
-                shutil.rmtree('/tmp/rar_extract', ignore_errors=True)
-            else:
-                raise Exception("No se pudo extraer el archivo RAR")
+                self.update_status("Limpieza completada")
                 
         except Exception as e:
-            raise Exception(f"No se pudo convertir el archivo. Asegúrate de tener instalado rarfile o 7zip: {e}")
+            raise Exception(f"Error con 7zip: {str(e)}")
+    
+    def convert_with_unar(self, rar_path, zip_path):
+        """Método alternativo usando unar si está disponible"""
+        try:
+            import subprocess
+            import tempfile
+            
+            self.update_status("Intentando con unar...")
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                self.update_status(f"Extrayendo con unar a: {temp_dir}")
+                
+                # Intentar extraer con unar
+                result = subprocess.run([
+                    'unar', '-o', temp_dir, rar_path
+                ], capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    raise Exception(f"unar falló: {result.stderr}")
+                
+                self.update_status("Creando ZIP desde archivos extraídos...")
+                
+                # Crear ZIP desde archivos extraídos
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            arcname = os.path.relpath(file_path, temp_dir)
+                            zip_file.write(file_path, arcname)
+                            self.update_status(f"Agregando: {arcname}")
+                
+                self.update_status("unar conversión completada")
+                
+        except Exception as e:
+            raise Exception(f"Error con unar: {str(e)}")
     
     def update_status(self, message):
         self.root.after(0, lambda: self.status_label.config(text=message))
 
-def main():
-    # Verificar dependencias
+def check_dependencies():
+    """Verificar que las dependencias necesarias estén disponibles"""
+    missing_deps = []
+    
     try:
         import rarfile
+        print("✓ rarfile disponible")
     except ImportError:
+        missing_deps.append("rarfile")
+        print("✗ rarfile no disponible")
+    
+    # Verificar 7zip
+    try:
+        import subprocess
+        result = subprocess.run(['7z'], capture_output=True, text=True)
+        if result.returncode == 0 or result.returncode == 7:  # 7zip devuelve 7 para ayuda
+            print("✓ 7zip disponible")
+        else:
+            missing_deps.append("7zip")
+            print("✗ 7zip no disponible")
+    except Exception:
+        missing_deps.append("7zip")
+        print("✗ 7zip no disponible")
+    
+    # Verificar unar
+    try:
+        import subprocess
+        result = subprocess.run(['unar'], capture_output=True, text=True)
+        if result.returncode == 0 or result.returncode == 1:  # unar devuelve 1 para ayuda
+            print("✓ unar disponible")
+        else:
+            missing_deps.append("unar")
+            print("✗ unar no disponible")
+    except Exception:
+        missing_deps.append("unar")
+        print("✗ unar no disponible")
+    
+    return missing_deps
+
+def main():
+    # Verificar dependencias
+    missing_deps = check_dependencies()
+    
+    if len(missing_deps) == 2:
         messagebox.showerror("Error", 
-                           "La librería 'rarfile' no está instalada.\n"
-                           "Instálala con: pip install rarfile")
+                           "No se encontraron las dependencias necesarias.\n"
+                           "Instala al menos una de estas opciones:\n"
+                           "- pip install rarfile\n"
+                           "- brew install p7zip")
         return
+    elif len(missing_deps) == 1:
+        print(f"⚠ Advertencia: {missing_deps[0]} no disponible, pero el programa puede funcionar")
     
     root = tk.Tk()
     app = RARtoZIPConverter(root)
