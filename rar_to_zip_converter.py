@@ -7,6 +7,45 @@ import threading
 from pathlib import Path
 import shutil
 
+
+def _is_dir(info):
+    """Return True if the archive entry represents a directory."""
+    if hasattr(info, "is_dir"):
+        return info.is_dir()
+    if hasattr(info, "isdir"):
+        return info.isdir()
+    return False
+
+
+def convert_rar_to_zip_file(rar_path, zip_path, progress_callback=None):
+    """Convert a RAR (or ZIP) archive to a ZIP file preserving directories."""
+
+    opener = rarfile.RarFile if rarfile.is_rarfile(rar_path) else zipfile.ZipFile
+
+    with opener(rar_path, "r") as archive, zipfile.ZipFile(
+        zip_path, "w", zipfile.ZIP_DEFLATED
+    ) as zip_file:
+        info_list = archive.infolist()
+        files = [info for info in info_list if not _is_dir(info)]
+        total = len(files) or 1
+        processed = 0
+
+        for info in info_list:
+            name = info.filename
+            if _is_dir(info):
+                # Asegurarnos de que las entradas de directorio terminen con '/'
+                if not name.endswith("/"):
+                    name += "/"
+                zip_file.writestr(name, b"")
+                continue
+
+            with archive.open(info) as source:
+                zip_file.writestr(name, source.read())
+
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, total, name)
+
 class RARtoZIPConverter:
     def __init__(self, root):
         self.root = root
@@ -107,52 +146,34 @@ class RARtoZIPConverter:
         try:
             rar_path = self.rar_file_path.get()
             zip_path = self.zip_destination_path.get()
-            
+
             self.update_status("Iniciando conversión...")
             self.progress_var.set(10)
-            
+
             # Verificar que el archivo RAR existe
             if not os.path.exists(rar_path):
                 raise FileNotFoundError(f"No se encontró el archivo: {rar_path}")
-            
-            # Crear archivo ZIP
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                try:
-                    # Intentar abrir con rarfile
-                    with rarfile.RarFile(rar_path, 'r') as rar_file:
-                        file_list = rar_file.namelist()
-                        total_files = len(file_list)
-                        
-                        for i, file_name in enumerate(file_list):
-                            try:
-                                # Leer contenido del archivo RAR
-                                file_data = rar_file.read(file_name)
-                                
-                                # Escribir en el ZIP
-                                zip_file.writestr(file_name, file_data)
-                                
-                                # Actualizar progreso
-                                progress = 10 + (i + 1) / total_files * 80
-                                self.progress_var.set(progress)
-                                self.update_status(f"Convirtiendo: {file_name}")
-                                
-                            except Exception as e:
-                                print(f"Error procesando {file_name}: {e}")
-                                continue
-                
-                except rarfile.BadRarFile:
-                    # Fallback: usar 7zip si está disponible
-                    self.update_status("Usando método alternativo...")
-                    self.convert_with_7zip(rar_path, zip_path)
-            
+
+            def progress_cb(processed, total, name):
+                progress = 10 + processed / total * 80
+                self.progress_var.set(progress)
+                self.update_status(f"Convirtiendo: {name}")
+
+            try:
+                convert_rar_to_zip_file(rar_path, zip_path, progress_cb)
+            except rarfile.BadRarFile:
+                # Fallback: usar 7zip si está disponible
+                self.update_status("Usando método alternativo...")
+                self.convert_with_7zip(rar_path, zip_path)
+
             self.progress_var.set(100)
             self.update_status("Conversión completada exitosamente!")
             messagebox.showinfo("Éxito", "El archivo RAR ha sido convertido a ZIP correctamente")
-            
+
         except Exception as e:
             self.update_status(f"Error: {str(e)}")
             messagebox.showerror("Error", f"Error durante la conversión:\n{str(e)}")
-        
+
         finally:
             # Rehabilitar botones
             self.root.after(0, lambda: self.convert_button.config(state="normal"))
